@@ -25,6 +25,7 @@ Begin:
         mov [prompt_pos + DATA_OFFSET],dl
         mov word [operand_pos + DATA_OFFSET],0
         mov word [load_seg + DATA_OFFSET],1000h
+        mov byte [sload_flag],0
         mov di,cmd
         add di,DATA_OFFSET
 ScanKey:
@@ -230,6 +231,12 @@ ReadSlim_end:
         ret
 
 Load:
+        pushf
+        pop ax
+        btr ax,8             ;设置TF=0
+        push ax 
+        popf                    ;设置flags
+
         mov di,Slim16
         add di,DATA_OFFSET
         mov cx,word [di]
@@ -295,21 +302,43 @@ Cmp_succ:
      ;   cmp [es:dx-2],ax
       ;  jnz Load_fail
         ;
+
+        cmp byte [sload_flag+DATA_OFFSET],0
+        je Load_call
+        pushf                   ;保存全部标志到堆栈
+        pop ax                  ;从堆栈中取出全部标志
+        or ax,0100h             ;设置TF=1
+        push ax 
+        popf                    ;设置flags
+Load_call:
         call far [es:0]        ;该地址指向4字节(偏移+段地址)
 Load_end:
         ret
 
+SLoad:
+        pushf
+        mov byte [sload_flag+DATA_OFFSET],1            
+        call Load
+SLoad_end:
+        popf
+        mov byte [sload_flag+DATA_OFFSET],0         
+        ret
 
-;setint shift_hold.int 9
+
+;setint hello.int 21
 SetInt:
-        mov word [load_seg + DATA_OFFSET],1000h
+        mov di,Slim16
+        add di,DATA_OFFSET
+        mov cx,word [di]
+        add di,2
+
         mov si,[operand_pos + DATA_OFFSET]
         push si
         call SplitCmd
 SetInt_get_addr:
         mov si,[operand_pos + DATA_OFFSET]
         call HexStr2Uint
-        mov word [int_handler_offset + DATA_OFFSET],ax
+        mov [int_handler_type+DATA_OFFSET],ax
         pop si
 SetInt_CmpName:
         call StrCmp
@@ -319,14 +348,14 @@ SetInt_CmpName:
         loop SetInt_CmpName
 SetInt_Cmp_fail:
         call PrintStr
-        mov si,load_error
+        mov si,cmd_error
         add si,DATA_OFFSET
         call PrintStr
         jmp SetInt_end
 SetInt_Load_fail:
         mov si,[operand_pos + DATA_OFFSET]
         call PrintStr
-        mov si,load_error
+        mov si,setint_error
         add si,DATA_OFFSET
         call PrintStr
         jmp SetInt_end
@@ -339,15 +368,32 @@ SetInt_Cmp_succ:
         mov dx,word [di+2]
         mov word [DiskAP+DATA_OFFSET+2],dx      
         mov word [DiskAP+DATA_OFFSET+4],0
-        mov ax, word [load_seg + DATA_OFFSET]
+        mov ax, word [int_seg + DATA_OFFSET]
         mov word [DiskAP+DATA_OFFSET+6],ax
         mov dl,80h
         mov ah,42h
         int 13h
         jc SetInt_Load_fail
         ;
+        mov ax, word [int_seg + DATA_OFFSET]
+        mov es,ax               ;给要加载的程序分配段地址
+        mov ax,[es:0]
+
+        mov bx,[int_handler_type+DATA_OFFSET]
+        shl bx,2
+        mov word [bx],ax
+        mov ax,[int_seg+DATA_OFFSET]
+        mov word [bx+2],ax
+        add word [int_seg+DATA_OFFSET],8
+        
 SetInt_end:
         ret
+
+InitInt:
+        mov si,prompt3
+        call PrintStr
+InitInt_end:
+        ret        
 
 HexStr2Uint:
         xor ax,ax
@@ -432,35 +478,20 @@ Roll:
         cmp word [operand_pos + DATA_OFFSET],0
         jne Roll_with_operand
 Roll_without_operand:
-        mov ax,101
-        push ax
+        mov cx,101
         jmp get_random_byte
 Roll_with_operand:
         mov si,word [operand_pos + DATA_OFFSET]
         call DecStr2Uint
         inc ax
-        push ax
+        mov cx,ax
 get_random_byte:
-        mov al,2
-        out 70h,al
-        in al,71h       ;读时钟秒数
-        push ax
 
-        mov al,0
-        out 70h,al
-        in al,71h       ;读时钟秒数
-        pop dx
-        add ax,dx
-
-        rdtsc           ;读取时钟(x86指令)
-
-        mul dx
-        add al,ah
-        rol ax,4
+        mov ah,1
+        int 21h
 
         and ah,3
-        pop dx
-        DIV DL
+        div cl
         mov al,ah
         xor ah,ah
         ;
@@ -507,13 +538,10 @@ reverse_str_loop_start:
 reverse_str_loop_end:
         ret
 
-int20h_handler:
-        lea si,[cmd5+DATA_OFFSET]
-        call PrintStr
-        iret
 
 prompt	        db	"xusysh@my_dos> ",0
 prompt2         db      "Reading Slim16 TAB...",0dh,0ah,0
+prompt3         db      "Initializing interrupt table",0dh,0ah,0
 prompt_pos      db      0                 ;记录提示信息结尾位置
 newline         db      0dh,0ah,0
 tab             db      "    ",0
@@ -526,7 +554,9 @@ cmd             db      "                                               ",0
 trimed_cmd      db      "                                               ",0
 operand_pos     dw      0
 load_seg        dw      0
-int_handler_offset         dw      0
+int_seg         dw      500h
+int_handler_type         dw      0
+sload_flag      db      0
 cmd_len         equ     15
 cmd1            db      "poweroff",0,"      "
 cmd2            db      "echo",0,"          "
@@ -534,9 +564,11 @@ cmd3            db      "load",0,"          "
 cmd4            db      "ls",0,"            "
 cmd5            db      "roll",0,"          "
 cmd6            db      "setint",0,"        "
+cmd7            db      "sload",0,"         "
 cmd_count       equ     ($-cmd1)/cmd_len
 cmd_tab         dw      cmd1,PowerOff,cmd2,Echo,cmd3,Load
                 dw      cmd4,Ls,cmd5,Roll,cmd6,SetInt
+                dw      cmd7,SLoad
         ;
 DiskAP:
     db  10h             ;DAP尺寸
