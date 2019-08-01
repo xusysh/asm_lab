@@ -1,2 +1,1 @@
-# 8086 code 
-# compile with nasm
+# 8086 code - compile with nasm
